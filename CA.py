@@ -34,6 +34,7 @@ def sign_csr():
     )
 
     cert_pem = client_cert.public_bytes(serialization.Encoding.PEM)
+    print(cert_pem.decode('utf-8'))
     return jsonify({"certificate": cert_pem.decode('utf-8')})
 
 
