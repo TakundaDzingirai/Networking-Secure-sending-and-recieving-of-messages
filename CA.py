@@ -37,8 +37,8 @@ def create_ca():
         x509.NameAttribute(NameOID.COUNTRY_NAME, u"SA"),
         x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, u"Cape Town"),
         x509.NameAttribute(NameOID.LOCALITY_NAME, u"UCT"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"PTV"),
-        x509.NameAttribute(NameOID.COMMON_NAME, u"PTV CA"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"UCT-CA"),
+        x509.NameAttribute(NameOID.COMMON_NAME, u" UCT Certificate Authority"),
     ])
 
     ca_cert = (

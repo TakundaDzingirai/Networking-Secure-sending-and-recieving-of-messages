@@ -1,6 +1,7 @@
 import socket
 import requests
 from cryptography import x509
+from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -9,19 +10,70 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 import zlib
 import json
+from cryptography.hazmat.primitives.serialization import load_pem_private_key, load_pem_public_key
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding as sym_padding
 from os import urandom
+import os
+import hashlib
+from hashlib import sha256
 
 phoneNumber =""
 CApublic_Key=[]
 pBkeys={}
 ClientpBkey=[]
-username=[]
+userInfo=[]
 
 
 
 secretKeys={}
+
+def load_or_create_keys(key_path, cert_path):
+    """
+    Load or create RSA private/public key pair.
+    """
+    # Check if both the private key and certificate exist
+    if os.path.exists(key_path):
+        # Load the private key from file
+        with open(key_path, 'rb') as key_file:
+            private_key = load_pem_private_key(
+                key_file.read(),
+                password=None,
+                backend=default_backend()
+            )
+        if isinstance(private_key, rsa.RSAPrivateKey):
+            print("Private key loaded successfully and is a valid RSA private key.")
+        else:
+            raise ValueError("Loaded key is not a valid RSA private key.")
+    else:
+        # Generate a new private key
+        private_key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048,
+            backend=default_backend()
+        )
+        print("Generated a new RSA private key.")
+
+        # Optionally save the private key to a file
+        with open(key_path, 'wb') as key_file:
+            key_file.write(
+                private_key.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.PKCS8,
+                    encryption_algorithm=serialization.NoEncryption()
+                )
+            )
+        print("New private key saved to file.")
+
+    return private_key
+key_path = "client_key.pem"
+cert_path = "client_cert.pem"
+
+# Load or create keys
+
+client_key = load_or_create_keys(key_path, cert_path)
+
+
 def load_public_key(pem_data):
     return serialization.load_pem_public_key(
         pem_data,
@@ -40,37 +92,32 @@ def find_free_port():
 
 portt=find_free_port()
 # Generate RSA Key Pair for the client
-client_key = rsa.generate_private_key(
-    public_exponent=65537,  # Commonly used RSA public exponent
-    key_size=2048,  # 2048-bit key size for secure encryption
-)
+
+
+
 
 def CSR():
     """
     Create a Certificate Signing Request (CSR).
-
-    The CSR is generated for the client with a common name based on the client's IP address.
-    The CSR is then signed using the client's RSA private key and hashed with SHA-256.
-    The result is returned as PEM-encoded bytes.
     """
-    # Get the client's IP address
+    # Ensure the client_key is an RSA private key instance
+    if not isinstance(client_key, rsa.RSAPrivateKey):
+        raise TypeError("client_key must be an RSAPrivateKey instance")
+
+    # Get the client's IP address as the common name for the certificate
     client_ip = socket.gethostbyname(socket.gethostname())
+    username = signUp()  # This should be defined appropriately
 
-    # Build the CSR with the IP address as the common name
-
-    username.append(signUp())
-    csr = (
-        x509.CertificateSigningRequestBuilder()
-        .subject_name(
-            x509.Name([
-                x509.NameAttribute(x509.NameOID.COMMON_NAME, u""+username[0]+"-" + client_ip)
-            ])
-        )
-        .sign(client_key, hashes.SHA256())  # Sign the CSR using the private key
+    # Create a CSR with the common name set to the client's IP
+    csr_builder = x509.CertificateSigningRequestBuilder().subject_name(
+        x509.Name([
+            x509.NameAttribute(NameOID.COMMON_NAME, username + "-" + client_ip)
+        ])
     )
-    # Convert CSR to PEM format
-    csr_pem = csr.public_bytes(serialization.Encoding.PEM)
-    return csr_pem
+    
+    # Sign the CSR using the client's private key and return the PEM-encoded CSR
+    csr = csr_builder.sign(private_key=client_key, algorithm=hashes.SHA256(), backend=default_backend())
+    return csr.public_bytes(serialization.Encoding.PEM)
 
 def certify():
     """
@@ -128,14 +175,51 @@ def start_client(server_host='127.0.0.1', server_port=65432):
 
 
 def signUp():
-    usrname = input("Enter User:\n")
-    # phoneNumber = input("Enter phone number:\n")
-    return usrname
+    """
+    Prompt user to enter username and password, validate them, and continue to prompt
+    until valid inputs are received.
+
+    Returns:
+        str: The username of the user after successful validation.
+    """
+    username = ""
+    while True:
+        try:
+            # Get username from user and validate it
+
+            if username =="":
+                username = input("Enter Username:\n")
+                if len(username) < 5:
+                    raise ValueError("Username must be at least 5 characters long.")
+                if not username.isalnum():
+                    raise ValueError("Username must be alphanumeric.")
+
+            # Get password from user and validate it
+            password = input("Enter Password:\n")
+            if len(password) < 8:
+                raise ValueError("Password must be at least 8 characters long.")
+            if not any(char.isdigit() for char in password):
+                raise ValueError("Password must contain at least one digit.")
+            if not any(char.isalpha() for char in password):
+                raise ValueError("Password must contain at least one letter.")
+
+            # If both inputs are valid, break the loop
+            break
+        except ValueError as e:
+            print(f"Error: {e}")
+            print("Please try again.")
+        except Exception as e:
+            print(f"An unexpected error occurred: {e}")
+            print("Please try again.")
+
+    print("Signup successful!")
+    userInfo.append(username)
+    userInfo.append(password)
+    return username
 
 def compress_data(data):
     """Compress data using zlib."""
     return zlib.compress(data.encode('utf-8'))
-
 
 
 def encrypt_data(data, secret_key):
@@ -162,40 +246,40 @@ def sign_data(data, receiver_public_key):
         )
     )
 
-
-def reg(url, receiver_public_key_pem):
-    # Load the public key from PEM data
+def reg(url, receiver_public_key_pem, session_id):
+    """Register by sending secured data to the server with a session ID."""
     receiver_public_key = load_public_key(receiver_public_key_pem)
-
-    # Data to be sent, including client information
     data = {
         "Client": {
-            "Name": username[0],
-            "Public_Key": ClientpBkey[0],  # This should also be a public key object or handled similarly
-            "Port_Num": portt        
+            "Name": userInfo[0],
+            "Public_Key": ClientpBkey[0],
+            "password": userInfo[1]        
         }
     }
 
+    # Convert the data to JSON, hash it, compress it, and prepare for encryption
     data_string = json.dumps(data)
+    hasher = sha256()
+    hasher.update(data_string.encode('utf-8'))
+    data_hash = hasher.digest()
 
-    # Compress, Encrypt and then sign the secret key
-    compressed_data = compress_data(data_string)
+    compressed_data = zlib.compress(data_string.encode('utf-8'))
+    payload_to_encrypt = compressed_data + b'|' + data_hash
+
     secret_key = generate_secret_key()
-    encrypted_data = encrypt_data(compressed_data, secret_key)
-    print("Encrpted data: ",encrypted_data)
-    signed_secret_key = sign_data(secret_key, receiver_public_key)  # receiver_public_key must be an object
-    print("signed key",signed_secret_key)
-    # Prepare the payload
+    encrypted_data = encrypt_data(payload_to_encrypt, secret_key)
+    signed_secret_key = sign_data(secret_key, receiver_public_key)
+
+    # Prepare payload with headers including the session ID
+    headers = {'X-Session-ID': session_id}
     payload = {
         "encrypted_data": encrypted_data.hex(),
-        "signed_secret_key": signed_secret_key.hex(),
-       
+        "signed_secret_key": signed_secret_key.hex()
     }
 
-    # Send the payload to the server
-    response = requests.post(url + "/reg", json=payload)
+    # Send the payload with the session ID header to authenticate the request
+    response = requests.post(url + "/reg", headers=headers, json=payload)
     print("Server response:", response.text)
-
 
 def fetch_and_verify_server_certificate(server_verify_url, ca_public_key):
     response = requests.get(server_verify_url)
@@ -241,7 +325,7 @@ def send_certificate_and_key(cert_path, key_path, server_url):
     # For this example, let's assume we have the CA's public key as `ca_public_key`
     ca_public_key_pem = CApublic_Key[0]
     ca_public_key = serialization.load_pem_public_key(ca_public_key_pem) # You need to define or load this correctly based on your setup
-    print(ca_public_key)
+  
     if not fetch_and_verify_server_certificate(server_verify_url, ca_public_key):
         print("Aborting connection due to failed server verification.")
         return
@@ -265,18 +349,21 @@ def send_certificate_and_key(cert_path, key_path, server_url):
     # Prepare the data to be sent
     data = {
         'certificate': client_cert.decode('utf-8'),
-        'public_key': client_public_key_pem.decode('utf-8')
+       
     }
 
-    ClientpBkey.append(data["public_key"])
+    ClientpBkey.append(client_public_key_pem.decode('utf-8'))
     # Send the data to the server
     response = requests.post(server_url+"/connect", json=data)
 
     # Handle the response
     if response.status_code == 200:
         print("Successfully connected to the server.")
-        reg(server_url,pBkeys[5000])
-        print(response.json())
+        session_id =response.json()["session_id"]
+        print(session_id)
+        reg(server_url,pBkeys[5000],session_id)
+       
+      
     else:
         print(f"Failed to connect to the server. Status code: {response.status_code}")
         print(response.text)
@@ -291,6 +378,15 @@ def getCApbKey():
         print("CA Public Key fetched successfully.")
     else:
         print(f"Failed to fetch CA public key. Status code: {response.status_code}")
+
+
+
+
+
+
+
+# Define paths for the key and certificate
+
 
 if __name__ == "__main__":
     certify()

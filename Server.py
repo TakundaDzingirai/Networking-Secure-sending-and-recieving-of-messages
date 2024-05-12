@@ -12,10 +12,13 @@ import zlib
 import json
 from cryptography.hazmat.primitives import padding as sym_padding
 from hashlib import sha256
+import hashlib
+import uuid
+
 privateKeyRing = {}
 CApublic_Key = []
 clientInfor = {}
-
+client_sessions ={}
 public_keys={}
 server_key = rsa.generate_private_key(
     public_exponent=65537,
@@ -68,7 +71,7 @@ def certify():
         print("Failed to obtain certificate")
 
 
-def verify_certificate(client_cert, ca_public_key):
+def verify_certificate(client_cert,ca_public_key_pem):
     """
     Verify the certificate's validity and revocation status.
 
@@ -80,6 +83,12 @@ def verify_certificate(client_cert, ca_public_key):
     if not (client_cert.not_valid_before_utc <= current_time <= client_cert.not_valid_after_utc):
         print("Certificate is outside its validity period.")
         return False
+
+    # Load the public key from PEM format
+    ca_public_key = serialization.load_pem_public_key(
+        ca_public_key_pem,
+        backend=default_backend()
+    )
 
     try:
         ca_public_key.verify(
@@ -96,40 +105,6 @@ def verify_certificate(client_cert, ca_public_key):
     # Additional logic to check revocation status (not fully implemented here)
     return True
 
-def decrypt_data(encrypted_data, secret_key):
-    """Decrypt data using the provided secret key (AES)."""
-    iv = encrypted_data[:16]
-    ct = encrypted_data[16:]
-
-    cipher = Cipher(algorithms.AES(secret_key), modes.CBC(iv), backend=default_backend())
-    decryptor = cipher.decryptor()
-    padded_data = decryptor.update(ct) + decryptor.finalize()
-
-    # Remove padding
-    unpadder = sym_padding.PKCS7(algorithms.AES.block_size).unpadder()
-    data = unpadder.update(padded_data) + unpadder.finalize()
-    return data
-
-
-def decompress_data(compressed_data):
-    """
-    Decompress data using zlib.
-
-    Args:
-        compressed_data (bytes): The compressed data in bytes.
-
-    Returns:
-        bytes: The original uncompressed data.
-    """
-    try:
-        # Decompress the data
-        original_data = zlib.decompress(compressed_data)
-    except zlib.error as e:
-        raise Exception(f"Decompression error: {str(e)}")
-    
-    return original_data
-
-
 certify()
 setCApub()
 
@@ -138,31 +113,29 @@ app = Flask(__name__)
 
 @app.route('/connect', methods=['POST'])
 def connect():
-    data = request.get_json()
-    public_key_str = data['public_key']
-    cert_str = data['certificate']
-    public_key_bytes = public_key_str.encode('utf-8')
+    cert_str = request.json.get('certificate')
     cert_bytes = cert_str.encode('utf-8')
 
-    ca_public_key_pem = CApublic_Key[0]
-    ca_public_key = serialization.load_pem_public_key(ca_public_key_pem)
-
+    # Load the client's certificate and extract public key
     client_cert = x509.load_pem_x509_certificate(cert_bytes)
-    if not verify_certificate(client_cert, ca_public_key):
-        return jsonify({"error": "Certificate verification failed."}), 400
-
-   
-    public_key_pem = client_cert.public_key().public_bytes(
+    public_key = client_cert.public_key()
+    
+    # Generate a hash of the public key to use as a unique identifier
+    public_key_pem = public_key.public_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo
     )
-    actualPBKey=public_key_pem.decode('utf-8').strip('\n').split("-----BEGIN PUBLIC KEY-----\n")[1].split("\n-----END PUBLIC KEY-----")[0].replace("\n","")
-    public_key_id = actualPBKey[-16:]
-    privateKeyRing[public_key_id] = actualPBKey
-    # print(privateKeyRing)
-    print("Client publicKey",actualPBKey)
-
-    return jsonify({"message": "Verification successful, now send me your UserName and portnumber."})
+    public_key_hash = hashlib.sha256(public_key_pem).hexdigest()
+    
+    # Verify the certificate (simplified here)
+    if not verify_certificate(client_cert,CApublic_Key[0]):
+        return jsonify({"error": "Certificate verification failed."}), 400
+    
+    # Create a session ID or use an existing one
+    session_id = client_sessions.get(public_key_hash, str(uuid.uuid4()))
+    client_sessions[public_key_hash] = session_id  # Store or update session ID
+    
+    return jsonify({"message": "Connected successfully.", "session_id": session_id})
 @app.route('/verify', methods=['GET'])
 def sendVerification():
     # Read the server's certificate from a file
@@ -186,14 +159,24 @@ def compute_public_key_id(public_key_pem):
     """Compute a public key ID using SHA-256 hash of the public key."""
     hash_digest = sha256(public_key_pem.encode()).hexdigest()
     return hash_digest[:16]  # Take first 16 characters for the key ID
+from hashlib import sha256
+import zlib
+from flask import Flask, request, jsonify
+
+
 
 @app.route("/reg", methods=["POST"])
 def handle_registration():
-    data = request.get_json()
-    encrypted_data = bytes.fromhex(data['encrypted_data'])
-    signed_secret_key = bytes.fromhex(data['signed_secret_key'])
-   
-
+    session_id = request.headers.get('X-Session-ID')
+    
+    # Retrieve client public key hash using session ID
+    public_key_hash = next((k for k, v in client_sessions.items() if v == session_id), None)
+    if not public_key_hash:
+        return jsonify({"error": "Invalid session ID."}), 401
+    
+    # Extract encrypted data and signature
+    encrypted_data = bytes.fromhex(request.json['encrypted_data'])
+    signed_secret_key = bytes.fromhex(request.json['signed_secret_key'])
     try:
         secret_key = server_key.decrypt(
             signed_secret_key,
@@ -203,21 +186,53 @@ def handle_registration():
                 label=None
             )
         )
-        decrypted_data = decrypt_data(encrypted_data, secret_key)
-        decompressed_data = decompress_data(decrypted_data)
-        original_data = decompressed_data.decode('utf-8')
-        original_data_json = json.loads(original_data)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"Failed to decrypt secret key: {str(e)}"}), 500
 
-    client_public_key_pem = original_data_json['Client']['Public_Key']
-    public_key_id = compute_public_key_id(client_public_key_pem)
-    
-    # Store the public key and its ID
-    public_keys[public_key_id] = client_public_key_pem
+    try:
+        decrypted_data = decrypt_data(encrypted_data, secret_key)
+        original_data_json, original_hash = decompress_and_verify_hash(decrypted_data)
 
-    print(f"Stored Public Key ID: {public_key_id}")
-    return jsonify({"message": "Registration successful, public key stored", "public_key_id": public_key_id})
+
+    except Exception as e:
+        return jsonify({"error": f"Failed to process data: {str(e)}"}), 500
+
+    return jsonify({"message": "Registration successful, data processed"})
+
+def decrypt_data(encrypted_data, secret_key):
+    iv = encrypted_data[:16]
+    ct = encrypted_data[16:]
+    cipher = Cipher(algorithms.AES(secret_key), modes.CBC(iv), backend=default_backend())
+    decryptor = cipher.decryptor()
+    decrypted_data = decryptor.update(ct) + decryptor.finalize()
+    return decrypted_data
+
+def decompress_and_verify_hash(data):
+    separator_index = data.rindex(b'|')
+    compressed_data = data[:separator_index]
+    sent_hash_bytes = data[separator_index + 1:]
+
+    decompressed_data = zlib.decompress(compressed_data)
+    computed_hash = sha256(decompressed_data).digest()
+
+    # Determine the correct length of the hash and adjust the sent hash bytes if necessary
+    rightLength = len(computed_hash)
+    sentLength = len(sent_hash_bytes)
+    print("Computed hash length:", rightLength)
+    print("Sent hash length:", sentLength)
+
+    if sentLength > rightLength:
+        # Truncate the sent hash bytes to match the length of the computed hash
+        sent_hash_bytes = sent_hash_bytes[:rightLength]
+
+    if sent_hash_bytes != computed_hash:
+        print(f"Sent hash: {sent_hash_bytes.hex()}")
+        print(f"Computed hash: {computed_hash.hex()}")
+        raise ValueError("Data hash does not match, data may be corrupted or tampered.")
+    else:
+        
+        print("they the same")
+    return json.loads(decompressed_data.decode('utf-8')), computed_hash
 
 if __name__ == "__main__":
     app.run(port=5000, debug=True)
