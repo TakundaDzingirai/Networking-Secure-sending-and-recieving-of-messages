@@ -18,6 +18,8 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.padding import PKCS7
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from flask import Flask, request, jsonify
+import threading
 
 
 
@@ -586,6 +588,14 @@ def decompress_and_verify_hash(encrypted_data):
     except Exception as e:
         print(f"Error during decompression or hash verification: {e}")
         return None
+from cryptography.hazmat.primitives import serialization
+
+def public_key_to_pem(public_key):
+    pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    return pem.decode('utf-8')
 
 def viewClients(url):
     headers = {'X-Session-ID': session_id}
@@ -626,6 +636,7 @@ def viewClients(url):
         print("Clients you can talk to:")
         for i, client in enumerate(data, 1):
             print(f"{i}. {client['id']}")
+        return data
     except Exception as e:
         print(f"Error processing data: {str(e)}")
 def updateSessionKey():
@@ -644,6 +655,13 @@ def updateSessionKey():
 
 def chat(pos,clients,fileType,url):
     clientHashedp =clients[pos]["id"][0]
+
+    client= input("Select number of the client you want talk to:\n")
+
+    fileType=input("""Select corresponding number of type of message you want to sent:
+1. Text
+2. Image/Video/pdf/doc/..etc
+              """)
    
 
     if fileType=="1":
@@ -655,24 +673,7 @@ def chat(pos,clients,fileType,url):
         }
         res= requests.post(url+"/chat",headers=headers,json=payload)
 
-
-# Define paths for the key and certificate
-
-
-if __name__ == "__main__":
-    server_url="http://localhost:5000"
-    
-    signUp() 
-    load_or_create_keys(key_path, cert_path)
-    certify()
-    getCApbKey()
-    send_certificate_and_key(
-        server_url,
-        cert_path="client_cert.pem",
-        key_path="client_key.pem",
-    )
-    # print("Successfully Connected to server")
-    updateSessionKey()
+def client_interaction():
     while True:
         print("""==================Server Services=========================
               1. View
@@ -683,10 +684,34 @@ if __name__ == "__main__":
               4. Change Password
 
               """)
-        option = input("Choose your option:")
-        if option =="1":
+        option = input("Choose your option: ")
+        if option == "1":
             viewClients(server_url)
-        
+        elif option == "2":
+            # Handle chat
+            pass
+        elif option == "3":
+            # Handle profile hiding
+            pass
+        elif option == "4":
+            # Handle password change
+            pass
 
+app = Flask(__name__)
 
+if __name__ == "__main__":
+    server_url = "http://localhost:5000"
+    
+    signUp()
+    load_or_create_keys(key_path, cert_path)
+    certify()
+    getCApbKey()
+    send_certificate_and_key(server_url, cert_path="client_cert.pem", key_path="client_key.pem")
+    updateSessionKey()
 
+    # Starting Flask in a separate thread without debug mode
+    flask_thread = threading.Thread(target=lambda: app.run(port=portt, debug=False, use_reloader=False))
+    flask_thread.start()
+
+    # Start client interaction in the main thread
+    client_interaction()

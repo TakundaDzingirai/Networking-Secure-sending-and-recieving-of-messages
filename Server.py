@@ -27,9 +27,10 @@ from datetime import datetime, timezone
 
 privateKeyRing = {}
 CApublic_Key = []
-clientInfor = {}
+public_Keys={}
 client_sessions ={}
-public_keys={}
+ClientsInfo ={}
+
 server_key = rsa.generate_private_key(
     public_exponent=65537,
     key_size=2048,
@@ -171,6 +172,7 @@ def connect():
         format=serialization.PublicFormat.SubjectPublicKeyInfo
     )
     public_key_hash = hashlib.sha256(public_key_pem).hexdigest()
+    public_Keys[public_key_hash]=public_key
     
     # Verify the certificate (simplified here)
     if not verify_certificate(client_cert,CApublic_Key[0]):
@@ -179,6 +181,9 @@ def connect():
     # Create a session ID or use an existing one
     session_id = client_sessions.get(public_key_hash, str(uuid.uuid4()))
     client_sessions[public_key_hash] = session_id  # Store or update session ID
+
+
+    
     
     return jsonify({"message": "Connected successfully.", "session_id": session_id})
 
@@ -212,9 +217,8 @@ def decompress_and_verify_hash(data):
         print(f"Sent hash: {sent_hash_bytes.hex()}")
         print(f"Computed hash: {computed_hash.hex()}")
         raise ValueError("Data hash does not match, data may be corrupted or tampered.")
-    else:
-        
-        print("they the same")
+    
+    
     return json.loads(decompressed_data.decode('utf-8')), computed_hash
 
 
@@ -249,6 +253,25 @@ def sign_data(data, private_key):
         ),
         hashes.SHA256()
     )
+
+
+def verifySignature(signature,client_public_key,decrypted_data):
+    try:
+        client_public_key.verify(
+            signature,
+            decrypted_data,  # Data that was originally signed by the client
+            asym_padding.PSS(
+                mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
+                salt_length=asym_padding.PSS.MAX_LENGTH
+            ),
+            hashes.SHA256()
+        )
+        return True
+    
+    except Exception as e:
+        print(f"Signature verification failed: {str(e)}")
+        return False
+
 @app.route('/verify', methods=['GET'])
 def sendVerification():
     # Read the server's certificate from a file
@@ -273,6 +296,11 @@ def compute_public_key_id(public_key_pem):
     hash_digest = sha256(public_key_pem.encode()).hexdigest()
     return hash_digest[:16]  # Take first 16 characters for the key ID
 
+def find_session_key_by_client_name(client_name):
+    for session_info in clients.values():
+        if session_info["Client Name"] == client_name:
+            return session_info["Session_key"]
+    return None  # Return None if no matching client name is found
 
 @app.route("/reg", methods=["POST"])
 def handle_registration():
@@ -301,19 +329,18 @@ def handle_registration():
     try:
         decrypted_data = decrypt_data(encrypted_data, secret_key)
         original_data_json, original_hash = decompress_and_verify_hash(decrypted_data)
+        session_key =generate_session_key(original_data_json["Client"]["password"],original_data_json["Client"]["salt"])
         
 
 
-        clients[session_id]={"Client Name":original_data_json["Client"]["Name"],"hashedkeyGen":original_data_json["Client"]["password"],"Public_Key_Hash":public_key_hash,"salt":original_data_json["Client"]["salt"]}
+        clients[session_id]={"Client Name":original_data_json["Client"]["Name"],"Session_key":session_key,"Public_Key":public_Keys[public_key_hash]}
 
        
-        print(clients)
-
-
     except Exception as e:
         return jsonify({"error": f"Failed to process data: {str(e)}"}), 500
 
     return jsonify({"message": "Registration successful, data processed"})
+
 
 @app.route("/view", methods=["GET"])
 def get_clients():
@@ -322,35 +349,90 @@ def get_clients():
         return jsonify({"error": "Invalid or missing session ID."}), 400
 
     client_data = clients.get(session_id)
-    print("Client Data",client_data)
     if not client_data:
         return jsonify({"error": "Session ID does not match any client."}), 404
 
-    session_key = generate_session_key(client_data["hashedkeyGen"],client_data["salt"])
-    names = [{"id": client["Client Name"], "hash": client["Public_Key_Hash"]} for client in clients.values()]
-    
+    try:
+        encrypted_data, signature = prepare_and_secure_client_data(client_data)
+        response_payload = {
+            "encrypted_data": base64.b64encode(encrypted_data).decode('utf-8'),
+            "signature": base64.b64encode(signature).decode('utf-8')
+        }
+        return jsonify(response_payload)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+
+def public_key_to_pem(public_key):
+    """
+    Convert a public key to PEM format.
+    """
+    pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    return pem.decode('utf-8')  # Convert bytes to string for JSON serialization
+
+def prepare_and_secure_client_data(client_data):
+    # Convert public keys from RSAPublicKey to PEM format strings
+    names = [
+        {
+            "id": client["Client Name"], 
+            "hash": public_key_to_pem(client["Public_Key"])
+        } for client in clients.values()
+    ]
     data_bytes = json.dumps(names).encode('utf-8')
-    # Compress data
     compressed_data = zlib.compress(data_bytes)
-    # Calculate hash of the compressed data
     data_hash = hashlib.sha256(compressed_data).digest()
-    # Combine compressed data and hash
     payload = compressed_data + b'|' + data_hash
 
-    print("Payload before encryption:", payload)  # Debug statement
-
-    print("Key:", session_key)
-
-
+    session_key = client_data["Session_key"]
     encrypted_data = encrypt_data(payload, session_key)
     signature = sign_data(encrypted_data, server_key)
+    return encrypted_data, signature
 
-    response_payload = {
-        "encrypted_data": base64.b64encode(encrypted_data).decode('utf-8'),
-        "signature": base64.b64encode(signature).decode('utf-8')
-    }
-    return jsonify(response_payload)
+@app.route("/chat", methods=["POST"])
+@app.route("/chat", methods=["POST"])
+def Converse():
+    session_id = request.headers.get('X-Session-ID')
+    if not session_id or session_id not in clients:
+        return jsonify({"error": "Invalid or missing session ID."}), 400
+    client_data = clients.get(session_id)
+    if not client_data:
+        return jsonify({"error": "Session ID does not match any client."}), 404
+    
+    req_payload = request.json()
+    encrypted_data = base64.b64decode(req_payload['message'])
+    recipient_name = req_payload['recipient']
+    signature = base64.b64decode(req_payload['signature'])
 
+    session_key = client_data["Session_key"]
+    if not session_key:
+        return jsonify({"error": "Failed to generate secret key"})
+
+    # Decrypt the data using the sender's session key
+    data = decrypt_data(encrypted_data, session_key)
+
+    # Verify the sender's signature
+    public_key_hash = client_data["Public_Key"]
+    client_public_key = public_Keys.get(public_key_hash)
+    if not client_public_key:
+        return jsonify({"error": "Public key not found for given session."}), 404
+    
+    if not verifySignature(signature, client_public_key):
+        return jsonify({"error": "Failed to verify signature"})
+
+    # Retrieve the recipient's session key using their name
+    recipient_session_key = find_session_key_by_client_name(recipient_name)
+    if not recipient_session_key:
+        return jsonify({"error": "Recipient not found or no session available."}), 404
+
+    # Encrypt the message for the recipient
+    encrypted_data_for_recipient = encrypt_data(data, recipient_session_key)
+    # Optionally, create a response payload if needed, or handle message sending
+
+    return jsonify({"message": "Message processed successfully"})
 
 
 
